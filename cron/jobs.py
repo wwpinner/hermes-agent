@@ -810,8 +810,8 @@ def _recoverable_oneshot_run_at(
         run_at_dt = _ensure_aware(datetime.fromisoformat(run_at))
     except Exception:
         return None
-    if _utc_instant(run_at_dt) >= _utc_instant(
-        now - timedelta(seconds=ONESHOT_GRACE_SECONDS)
+    if _utc_instant(run_at_dt) >= _utc_instant(now) - timedelta(
+        seconds=ONESHOT_GRACE_SECONDS
     ):
         return run_at
     return None
