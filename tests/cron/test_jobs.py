@@ -648,6 +648,52 @@ class TestResolveJobRef:
 
 
 class TestMarkJobRun:
+    def test_preserves_preadvanced_cron_after_first_fold_run_finishes_in_second_fold(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        """A long first-fold run must not re-arm its matching second fold."""
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        clock = [datetime(2026, 11, 1, 1, 29, tzinfo=ny, fold=0)]
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: clock[0])
+
+        job = create_job(prompt="Fall-back report", schedule="30 1 * * *")
+        assert job["next_run_at"] == "2026-11-01T01:30:00-04:00"
+
+        # The scheduler pre-advances under lock immediately before dispatch.
+        clock[0] = datetime(2026, 11, 1, 1, 30, tzinfo=ny, fold=0)
+        assert advance_next_run(job["id"]) is True
+        preadvanced = get_job(job["id"])
+        assert preadvanced is not None
+        assert preadvanced["next_run_at"] == "2026-11-02T01:30:00-05:00"
+
+        # The run crosses rollback and completes before the matching second-fold
+        # wall time. Completion must preserve the next-day pre-advance.
+        clock[0] = datetime(2026, 11, 1, 1, 10, tzinfo=ny, fold=1)
+        mark_job_run(job["id"], success=True)
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert updated["last_run_at"] == "2026-11-01T01:10:00-05:00"
+        assert updated["next_run_at"] == "2026-11-02T01:30:00-05:00"
+
+    def test_recomputes_stale_preadvanced_cron_from_completion(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        """A run that outlives its pre-advance still moves to a future slot."""
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        clock = [datetime(2026, 7, 1, 5, 0, tzinfo=ny)]
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: clock[0])
+
+        job = create_job(prompt="Long report", schedule="0 6 * * *")
+        assert job["next_run_at"] == "2026-07-01T06:00:00-04:00"
+
+        clock[0] = datetime(2026, 7, 2, 8, 0, tzinfo=ny)
+        mark_job_run(job["id"], success=True)
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert updated["next_run_at"] == "2026-07-03T06:00:00-04:00"
+
     def test_increments_completed(self, tmp_cron_dir):
         job = create_job(prompt="Test", schedule="every 1h")
         mark_job_run(job["id"], success=True)

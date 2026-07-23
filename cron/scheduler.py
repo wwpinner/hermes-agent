@@ -4157,7 +4157,9 @@ def tick(
         # before any execution begins.  This preserves at-most-once semantics.
         # For parallel jobs that are already running, advance_next_run keeps
         # bumping next_run_at forward so the grace window never expires.
-        # mark_job_run() overwrites next_run_at on completion.
+        # mark_job_run() preserves a still-future cron pre-advance and only
+        # recomputes it when missing, malformed, or stale; intervals remain
+        # completion-anchored.
         for job in due_jobs:
             advance_next_run(job["id"])
 
