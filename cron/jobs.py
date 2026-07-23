@@ -1741,7 +1741,8 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
     Mark a job as having been run.
     
     Updates last_run_at, last_status, increments completed count,
-    computes next_run_at, and auto-deletes if repeat limit reached.
+    preserves a future pre-advanced cron occurrence (or computes the next run),
+    and auto-deletes if the repeat limit is reached.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
@@ -1792,8 +1793,29 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         save_jobs(jobs)
                         return
                 
-                # Compute next run
-                job["next_run_at"] = compute_next_run(job["schedule"], now)
+                # The built-in ticker and external-provider fire path pre-advance
+                # recurring jobs under the store lock before dispatch. Preserve a
+                # still-future cron occurrence: recomputing from completion time
+                # can re-arm the second fall-back fold after the first fold has
+                # already run. Intervals intentionally remain completion-anchored.
+                kind = job.get("schedule", {}).get("kind")
+                preserve_preadvanced_cron = False
+                existing_next = job.get("next_run_at")
+                if kind == "cron" and HAS_CRONITER and existing_next:
+                    try:
+                        existing_dt = _ensure_aware(datetime.fromisoformat(existing_next))
+                        completed_dt = _ensure_aware(datetime.fromisoformat(now))
+                        preserve_preadvanced_cron = (
+                            existing_dt.astimezone(timezone.utc)
+                            > completed_dt.astimezone(timezone.utc)
+                        )
+                    except (TypeError, ValueError):
+                        # Missing/malformed state is repaired by the normal
+                        # completion-time computation below.
+                        pass
+
+                if not preserve_preadvanced_cron:
+                    job["next_run_at"] = compute_next_run(job["schedule"], now)
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't
@@ -1802,7 +1824,6 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # missing runtime dep into "job completed" and the user's
                 # schedule quietly goes off. See issue #16265.
                 if job["next_run_at"] is None:
-                    kind = job.get("schedule", {}).get("kind")
                     if kind in {"cron", "interval"}:
                         job["state"] = "error"
                         if not job.get("last_error"):
