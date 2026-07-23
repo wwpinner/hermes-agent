@@ -667,16 +667,24 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt.astimezone(target_tz)
 
 
-def _timezone_offset_mismatch(stored: datetime, current: datetime) -> bool:
-    """Return True when a stored aware timestamp uses a different UTC offset.
+def _utc_instant(dt: datetime) -> datetime:
+    """Normalize a datetime for absolute ordering across DST folds."""
+    return _ensure_aware(dt).astimezone(timezone.utc)
 
-    Naive stored timestamps return False: they carry no offset to compare, and
-    are normalized by ``_ensure_aware`` instead — they intentionally never take
-    the offset-repair path.
+
+def _timezone_offset_mismatch(stored: datetime, current: datetime) -> bool:
+    """Return True when ``stored`` is invalid for the configured zone at its instant.
+
+    A different offset from ``current`` is not enough: around DST, a persisted
+    first-fold timestamp can legitimately use EDT while ``current`` uses EST.
+    Convert the stored instant into the configured/current zone and compare its
+    expected offset instead. Naive stored timestamps return False because they
+    carry no offset to validate and are normalized by ``_ensure_aware``.
     """
     if stored.tzinfo is None or current.tzinfo is None:
         return False
-    return stored.utcoffset() != current.utcoffset()
+    expected_offset = stored.astimezone(current.tzinfo).utcoffset()
+    return stored.utcoffset() != expected_offset
 
 
 def _stored_wall_clock_is_future(stored: datetime, current: datetime) -> bool:
@@ -802,7 +810,9 @@ def _recoverable_oneshot_run_at(
         run_at_dt = _ensure_aware(datetime.fromisoformat(run_at))
     except Exception:
         return None
-    if run_at_dt >= now - timedelta(seconds=ONESHOT_GRACE_SECONDS):
+    if _utc_instant(run_at_dt) >= _utc_instant(
+        now - timedelta(seconds=ONESHOT_GRACE_SECONDS)
+    ):
         return run_at
     return None
 
@@ -2031,7 +2041,7 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
                     # "fresh" forever — the job becomes permanently unfireable
                     # and every manual `cron run` reports "already being
                     # fired". Treat future-dated claims as stale/overwritable.
-                    _age = (now - claimed_at).total_seconds()
+                    _age = (_utc_instant(now) - _utc_instant(claimed_at)).total_seconds()
                     if 0 <= _age < claim_ttl_seconds:
                         return False  # someone holds a fresh claim
                 except Exception:
@@ -2193,7 +2203,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                     # 0 <= age: a future-dated claim (clock/TZ skew across a
                     # restart) must be treated as stale, not eternally fresh,
                     # or the one-shot is skipped forever (#60703).
-                    _age = (now - claimed_at).total_seconds()
+                    _age = (_utc_instant(now) - _utc_instant(claimed_at)).total_seconds()
                     if 0 <= _age < _run_claim_ttl:
                         continue  # a fresh claim is held by an in-flight run
                 except (KeyError, ValueError, TypeError):
@@ -2218,7 +2228,15 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 # silently skipped forever; recompute next_run_at from the
                 # schedule so they pick up at their next scheduled tick.
                 if not recovered_next and kind in {"cron", "interval"}:
-                    recovered_next = compute_next_run(schedule, now.isoformat())
+                    # Cron recovery can use persisted execution state to resolve
+                    # an ambiguous fall-back hour: a never-run job may still use
+                    # the second fold, while a job that already ran the first
+                    # fold must advance past it. Intervals remain anchored to
+                    # recovery time so a broken record does not accumulate ticks.
+                    recovery_base = (
+                        job.get("last_run_at") if kind == "cron" else now.isoformat()
+                    )
+                    recovered_next = compute_next_run(schedule, recovery_base)
                     if recovered_next:
                         recovery_kind = kind
 
@@ -2244,6 +2262,8 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             kind = schedule.get("kind")
 
             next_run_dt = _ensure_aware(raw_next_run_dt)
+            now_utc = _utc_instant(now)
+            next_run_utc = _utc_instant(next_run_dt)
             # Migration repair: a cron job persists next_run_at as an absolute
             # instant, but the cron expr describes local wall-clock intent. If the
             # configured/system timezone changed after persistence, the stored
@@ -2252,16 +2272,12 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             # clock* is still in the future, recompute from the schedule so we fire
             # at the intended local time instead of early-then-again.
             #
-            # TRADE-OFF: this cannot distinguish a config/host TZ migration from a
-            # legitimate DST offset change. A DST boundary that satisfies all four
-            # conditions will recompute (and thus SKIP the pending occurrence, no
-            # catch-up) rather than fire it. Accepted: in the pure-migration case
-            # the recompute lands on the same wall-clock time later the same period,
-            # and DST-boundary collisions with a still-future stored wall clock are
-            # rare relative to the double-fire bug this prevents (#28934).
+            # A legitimate DST offset differs from ``now`` but remains valid for
+            # the configured zone at the stored instant, so it must continue to
+            # the normal absolute-time due check rather than taking this repair.
             if (
                 kind == "cron"
-                and next_run_dt <= now
+                and next_run_utc <= now_utc
                 and _timezone_offset_mismatch(raw_next_run_dt, now)
                 and _stored_wall_clock_is_future(raw_next_run_dt, now)
             ):
@@ -2282,13 +2298,16 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             break
                     continue
 
-            if next_run_dt <= now:
+            if next_run_utc <= now_utc:
 
                 # For recurring jobs, check if the scheduled time is stale
                 # (gateway was down and missed the window). Fast-forward to
                 # the next future occurrence instead of firing a stale run.
                 grace = _compute_grace_seconds(schedule)
-                if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
+                if (
+                    kind in {"cron", "interval"}
+                    and (now_utc - next_run_utc).total_seconds() > grace
+                ):
                     # Job is past its catch-up grace window — skip accumulated
                     # missed runs but still execute once now to avoid deferring
                     # indefinitely (e.g. a long-running job just finished).

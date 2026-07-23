@@ -4245,9 +4245,9 @@ def tick(
 
         # Parallel pass — persistent pool, non-blocking dispatch.
         # Jobs that are already running (from a previous tick) are skipped.
-        # mark_job_run() updates next_run_at on completion, so the next tick
-        # after completion finds the job due again naturally.  No catch-up
-        # queue needed.
+        # mark_job_run() finalizes state on completion while preserving a
+        # still-future cron pre-advance; the next tick then finds the job due
+        # naturally. No catch-up queue is needed.
         if parallel_jobs:
             pool = _get_parallel_pool(_max_workers)
             for job in parallel_jobs:

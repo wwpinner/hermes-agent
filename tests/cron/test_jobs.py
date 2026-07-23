@@ -20,6 +20,7 @@ from cron.jobs import (
     remove_job,
     mark_job_run,
     advance_next_run,
+    claim_job_for_fire,
     claim_dispatch,
     heartbeat_run_claim,
     get_due_jobs,
@@ -170,6 +171,15 @@ class TestNaiveScheduleTimezoneDivergence:
 # =========================================================================
 
 class TestComputeNextRun:
+    def test_oneshot_second_fold_is_future_by_absolute_time(self, monkeypatch):
+        ny = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=0),
+        )
+        run_at = "2026-11-01T01:00:00-05:00"
+        assert compute_next_run({"kind": "once", "run_at": run_at}) == run_at
+
     def test_once_future_returns_time(self):
         future = (datetime.now() + timedelta(hours=1)).isoformat()
         schedule = {"kind": "once", "run_at": future}
@@ -929,6 +939,32 @@ class TestAdvanceNextRun:
         assert len(due_after) == 0, "Job should not be due after advance_next_run"
 
 
+class TestClaimJobForFireFoldOrdering:
+    def test_future_fold_claim_is_stale_not_fresh(self, tmp_cron_dir, monkeypatch):
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=0)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        save_jobs(
+            [{
+                "id": "future-fold-claim",
+                "name": "Future fold claim",
+                "schedule": {"kind": "interval", "minutes": 60},
+                "enabled": True,
+                "state": "scheduled",
+                "next_run_at": "2026-11-01T02:00:00-05:00",
+                "fire_claim": {
+                    "at": "2026-11-01T01:00:00-05:00",
+                    "by": "future-clock",
+                },
+            }]
+        )
+
+        assert claim_job_for_fire("future-fold-claim") is True
+        updated = get_job("future-fold-claim")
+        assert updated is not None
+        assert updated["fire_claim"]["at"] == "2026-11-01T01:15:00-04:00"
+
+
 class TestGetDueJobs:
     def test_past_due_within_window_returned(self, tmp_cron_dir):
         """Jobs within the dynamic grace window are still considered due (not stale).
@@ -1429,6 +1465,78 @@ class TestGetDueJobs:
         if recovered_dt.tzinfo is None:
             recovered_dt = recovered_dt.replace(tzinfo=timezone.utc)
         assert recovered_dt > now
+
+    @pytest.mark.parametrize("bad_next", [None, "not-an-iso-timestamp"])
+    def test_broken_never_run_cron_recovers_still_future_second_fold(
+        self, tmp_cron_dir, monkeypatch, bad_next
+    ):
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=0)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        save_jobs(
+            [{
+                "id": "cron-fold-recover",
+                "name": "Fold recovery",
+                "prompt": "...",
+                "schedule": {"kind": "cron", "expr": "0 1 * * *", "display": "0 1 * * *"},
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "next_run_at": bad_next,
+                "last_run_at": None,
+            }]
+        )
+
+        assert get_due_jobs() == []
+        recovered = get_job("cron-fold-recover")
+        assert recovered is not None
+        assert recovered["next_run_at"] == "2026-11-01T01:00:00-05:00"
+
+    def test_broken_cron_does_not_repeat_completed_first_fold(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=0)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        save_jobs(
+            [{
+                "id": "cron-fold-completed",
+                "name": "Completed fold recovery",
+                "prompt": "...",
+                "schedule": {"kind": "cron", "expr": "0 1 * * *", "display": "0 1 * * *"},
+                "repeat": {"times": None, "completed": 1},
+                "enabled": True,
+                "state": "scheduled",
+                "next_run_at": None,
+                "last_run_at": "2026-11-01T01:00:00-04:00",
+            }]
+        )
+
+        assert get_due_jobs() == []
+        recovered = get_job("cron-fold-completed")
+        assert recovered is not None
+        assert recovered["next_run_at"] == "2026-11-02T01:00:00-05:00"
+
+    def test_due_scan_orders_folds_by_absolute_time(self, tmp_cron_dir, monkeypatch):
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 1, tzinfo=ny, fold=1)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        save_jobs(
+            [{
+                "id": "cron-first-fold-due",
+                "name": "First fold due",
+                "prompt": "...",
+                "schedule": {"kind": "cron", "expr": "59 1 * * *", "display": "59 1 * * *"},
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "next_run_at": "2026-11-01T01:59:00-04:00",
+                "last_run_at": None,
+            }]
+        )
+
+        due = get_due_jobs()
+        assert [job["id"] for job in due] == ["cron-first-fold-due"]
 
     def test_broken_interval_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
         now = datetime(2026, 3, 18, 10, 0, 0, tzinfo=timezone.utc)
