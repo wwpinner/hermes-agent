@@ -180,6 +180,15 @@ class TestComputeNextRun:
         run_at = "2026-11-01T01:00:00-05:00"
         assert compute_next_run({"kind": "once", "run_at": run_at}) == run_at
 
+    def test_oneshot_first_fold_outside_absolute_grace_is_stale(self, monkeypatch):
+        ny = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 11, 1, 1, 1, tzinfo=ny, fold=1),
+        )
+        run_at = "2026-11-01T01:00:00-04:00"
+        assert compute_next_run({"kind": "once", "run_at": run_at}) is None
+
     def test_once_future_returns_time(self):
         future = (datetime.now() + timedelta(hours=1)).isoformat()
         schedule = {"kind": "once", "run_at": future}
