@@ -692,7 +692,12 @@ def _stored_wall_clock_is_future(stored: datetime, current: datetime) -> bool:
     return stored.replace(tzinfo=None) > current.replace(tzinfo=None)
 
 
-def _croniter_next_wall_clock(expr: str, base: datetime) -> datetime:
+def _croniter_next_wall_clock(
+    expr: str,
+    base: datetime,
+    *,
+    include_repeated_before_base: bool = False,
+) -> datetime:
     """Return the next cron occurrence in the configured local wall clock.
 
     ``croniter`` applies elapsed-offset arithmetic when given an aware datetime,
@@ -702,9 +707,10 @@ def _croniter_next_wall_clock(expr: str, base: datetime) -> datetime:
     croniter against a naive local clock and then resolve that wall time in the
     configured timezone.
 
-    Nonexistent local times are skipped. Ambiguous local times use the earliest
-    still-future fold, while a job that already ran in the first fold advances
-    normally to its next cron occurrence rather than firing twice.
+    Nonexistent local times are skipped. For newly created/resumed schedules,
+    ambiguous local matches whose first fold already passed can still use the
+    second fold. A job that already ran in the first fold advances normally to
+    its next cron occurrence rather than firing twice.
     """
     if croniter is None:
         raise RuntimeError("croniter is required for cron schedules")
@@ -715,13 +721,48 @@ def _croniter_next_wall_clock(expr: str, base: datetime) -> datetime:
         return croniter(expr, local_base).get_next(datetime)
 
     base_utc = local_base.astimezone(timezone.utc)
-    cron = croniter(expr, local_base.replace(tzinfo=None))
+    naive_base = local_base.replace(tzinfo=None)
+    cron = croniter(expr, naive_base)
+    future_candidates: Dict[datetime, datetime] = {}
+
+    if include_repeated_before_base:
+        # Only a currently ambiguous wall time can have an earlier displayed
+        # cron match whose second fold is still in the absolute future.
+        base_instants: Set[datetime] = set()
+        for fold in (0, 1):
+            candidate = naive_base.replace(tzinfo=tz, fold=fold)
+            instant = candidate.astimezone(timezone.utc)
+            if instant.astimezone(tz).replace(tzinfo=None) == naive_base:
+                base_instants.add(instant)
+
+        if len(base_instants) > 1:
+            # croniter's naive cursor discards wall times before the displayed
+            # base time even when their second fold is still in the future.
+            # Walk today's preceding matches and retain only genuinely
+            # ambiguous localizations. This also finds the earliest match in a
+            # repeated hour for schedules such as ``*/15 1 * * *``.
+            previous = croniter(expr, naive_base + timedelta(microseconds=1))
+            wall_time = previous.get_prev(datetime).replace(tzinfo=None)
+            for _ in range(10000):
+                if wall_time.date() != naive_base.date():
+                    break
+                localized: Dict[datetime, datetime] = {}
+                for fold in (0, 1):
+                    candidate = wall_time.replace(tzinfo=tz, fold=fold)
+                    instant = candidate.astimezone(timezone.utc)
+                    round_trip = instant.astimezone(tz)
+                    if round_trip.replace(tzinfo=None) == wall_time:
+                        localized[instant] = candidate
+                if len(localized) > 1:
+                    for instant, candidate in localized.items():
+                        if instant > base_utc:
+                            future_candidates[instant] = candidate
+                wall_time = previous.get_prev(datetime).replace(tzinfo=None)
 
     # A candidate can be nonexistent at a DST jump. Keep asking croniter for
     # the next wall-clock match until one round-trips through UTC unchanged.
     for _ in range(10000):
         wall_time = cron.get_next(datetime).replace(tzinfo=None)
-        valid: Dict[datetime, datetime] = {}
         for fold in (0, 1):
             candidate = wall_time.replace(tzinfo=tz, fold=fold)
             instant = candidate.astimezone(timezone.utc)
@@ -729,9 +770,9 @@ def _croniter_next_wall_clock(expr: str, base: datetime) -> datetime:
             if round_trip.replace(tzinfo=None) != wall_time:
                 continue
             if instant > base_utc:
-                valid[instant] = candidate
-        if valid:
-            return valid[min(valid)]
+                future_candidates[instant] = candidate
+        if future_candidates:
+            return future_candidates[min(future_candidates)]
 
     raise ValueError(f"Could not resolve a valid local occurrence for cron expression {expr!r}")
 
@@ -849,12 +890,18 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         # the next run is anchored to the actual last execution time
         # rather than to an arbitrary restart time.
         base_time = now
+        base_is_last_run = False
         if last_run_at:
             try:
                 base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
+                base_is_last_run = True
             except Exception:
                 base_time = now
-        next_run = _croniter_next_wall_clock(expr, base_time)
+        next_run = _croniter_next_wall_clock(
+            expr,
+            base_time,
+            include_repeated_before_base=not base_is_last_run,
+        )
         return next_run.isoformat()
 
     return None

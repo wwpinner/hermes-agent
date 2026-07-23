@@ -272,6 +272,26 @@ class TestComputeNextRun:
 
         assert result == "2026-11-01T01:30:00-05:00"
 
+    def test_new_cron_uses_second_fold_for_earlier_repeated_wall_time(self, monkeypatch):
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=0)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        result = compute_next_run({"kind": "cron", "expr": "0 1 * * *"})
+
+        assert result == "2026-11-01T01:00:00-05:00"
+
+    def test_new_cron_uses_earliest_match_in_second_fold(self, monkeypatch):
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 59, tzinfo=ny, fold=0)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        result = compute_next_run({"kind": "cron", "expr": "*/15 1 * * *"})
+
+        assert result == "2026-11-01T01:00:00-05:00"
+
     def test_cron_does_not_repeat_after_first_ambiguous_fold(self, monkeypatch):
         pytest.importorskip("croniter")
         ny = ZoneInfo("America/New_York")
