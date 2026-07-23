@@ -3,6 +3,7 @@
 import threading
 import pytest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from cron.jobs import (
     parse_duration,
@@ -221,6 +222,70 @@ class TestComputeNextRun:
         next_dt = datetime.fromisoformat(result)
         assert isinstance(next_dt, datetime)
         assert next_dt > datetime.now().astimezone()
+
+    @pytest.mark.parametrize(
+        ("last_run", "expected"),
+        [
+            ("2026-03-07T06:00:00-05:00", "2026-03-08T06:00:00-04:00"),
+            ("2026-10-31T06:00:00-04:00", "2026-11-01T06:00:00-05:00"),
+        ],
+    )
+    def test_cron_preserves_wall_clock_across_new_york_dst(
+        self, monkeypatch, last_run, expected
+    ):
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 7, 1, 12, 0, tzinfo=ny),
+        )
+
+        result = compute_next_run(
+            {"kind": "cron", "expr": "0 6 * * *"},
+            last_run_at=last_run,
+        )
+
+        assert result == expected
+
+    def test_cron_skips_nonexistent_spring_forward_wall_time(self, monkeypatch):
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 3, 7, 12, 0, tzinfo=ny),
+        )
+
+        result = compute_next_run(
+            {"kind": "cron", "expr": "30 2 * * *"},
+            last_run_at="2026-03-07T02:30:00-05:00",
+        )
+
+        assert result == "2026-03-09T02:30:00-04:00"
+
+    def test_cron_uses_second_fold_when_it_is_only_future_match(self, monkeypatch):
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=1)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        result = compute_next_run({"kind": "cron", "expr": "30 1 * * *"})
+
+        assert result == "2026-11-01T01:30:00-05:00"
+
+    def test_cron_does_not_repeat_after_first_ambiguous_fold(self, monkeypatch):
+        pytest.importorskip("croniter")
+        ny = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 11, 1, 1, 31, tzinfo=ny, fold=0),
+        )
+
+        result = compute_next_run(
+            {"kind": "cron", "expr": "30 1 * * *"},
+            last_run_at="2026-11-01T01:30:00-04:00",
+        )
+
+        assert result == "2026-11-02T01:30:00-05:00"
 
     def test_unknown_kind_returns_none(self):
         assert compute_next_run({"kind": "unknown"}) is None

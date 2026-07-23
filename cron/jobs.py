@@ -31,7 +31,7 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Optional, Dict, List, Any, Set, Tuple, Union
@@ -45,6 +45,7 @@ try:
     from croniter import croniter
     HAS_CRONITER = True
 except ImportError:
+    croniter = None
     HAS_CRONITER = False
 
 # =============================================================================
@@ -585,7 +586,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     if len(parts) >= 5 and all(
         re.match(r'^[\d\*\-,/]+$', p) for p in parts[:5]
     ):
-        if not HAS_CRONITER:
+        if not HAS_CRONITER or croniter is None:
             raise ValueError("Cron expressions require 'croniter' package. Install with: pip install croniter")
         # Validate cron expression
         try:
@@ -691,6 +692,50 @@ def _stored_wall_clock_is_future(stored: datetime, current: datetime) -> bool:
     return stored.replace(tzinfo=None) > current.replace(tzinfo=None)
 
 
+def _croniter_next_wall_clock(expr: str, base: datetime) -> datetime:
+    """Return the next cron occurrence in the configured local wall clock.
+
+    ``croniter`` applies elapsed-offset arithmetic when given an aware datetime,
+    which can shift an ordinary local schedule by one hour across DST changes
+    (for example, ``0 6 * * *`` can become 05:00 after spring-forward or 07:00
+    after fall-back). Cron expressions represent wall-clock intent here, so run
+    croniter against a naive local clock and then resolve that wall time in the
+    configured timezone.
+
+    Nonexistent local times are skipped. Ambiguous local times use the earliest
+    still-future fold, while a job that already ran in the first fold advances
+    normally to its next cron occurrence rather than firing twice.
+    """
+    if croniter is None:
+        raise RuntimeError("croniter is required for cron schedules")
+
+    local_base = _ensure_aware(base)
+    tz = local_base.tzinfo
+    if tz is None:  # Defensive fallback; _ensure_aware normally guarantees this.
+        return croniter(expr, local_base).get_next(datetime)
+
+    base_utc = local_base.astimezone(timezone.utc)
+    cron = croniter(expr, local_base.replace(tzinfo=None))
+
+    # A candidate can be nonexistent at a DST jump. Keep asking croniter for
+    # the next wall-clock match until one round-trips through UTC unchanged.
+    for _ in range(10000):
+        wall_time = cron.get_next(datetime).replace(tzinfo=None)
+        valid: Dict[datetime, datetime] = {}
+        for fold in (0, 1):
+            candidate = wall_time.replace(tzinfo=tz, fold=fold)
+            instant = candidate.astimezone(timezone.utc)
+            round_trip = instant.astimezone(tz)
+            if round_trip.replace(tzinfo=None) != wall_time:
+                continue
+            if instant > base_utc:
+                valid[instant] = candidate
+        if valid:
+            return valid[min(valid)]
+
+    raise ValueError(f"Could not resolve a valid local occurrence for cron expression {expr!r}")
+
+
 def _recoverable_oneshot_run_at(
     schedule: Dict[str, Any],
     now: datetime,
@@ -743,9 +788,8 @@ def _compute_grace_seconds(schedule: dict) -> int:
         if expr:
             try:
                 now = _hermes_now()
-                cron = croniter(expr, now)
-                first = cron.get_next(datetime)
-                second = cron.get_next(datetime)
+                first = _croniter_next_wall_clock(expr, now)
+                second = _croniter_next_wall_clock(expr, first)
                 period_seconds = int((second - first).total_seconds())
                 grace = period_seconds // 2
                 return max(MIN_GRACE, min(grace, MAX_GRACE))
@@ -810,8 +854,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
                 base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
             except Exception:
                 base_time = now
-        cron = croniter(expr, base_time)
-        next_run = cron.get_next(datetime)
+        next_run = _croniter_next_wall_clock(expr, base_time)
         return next_run.isoformat()
 
     return None
