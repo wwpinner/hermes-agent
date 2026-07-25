@@ -2123,6 +2123,14 @@ class AIAgent:
             self._flushed_db_message_ids = set()
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
+            # A compression-closed parent is a permanent routing error, not a
+            # transient SQLite failure. Propagate it so the conversation loop
+            # terminates this turn instead of executing more tools/model calls
+            # while every incremental persist is guaranteed to fail.
+            from hermes_state import CompressionSessionClosedError
+
+            if isinstance(e, CompressionSessionClosedError):
+                raise
             logger.warning("Session DB append_message failed: %s", e)
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
