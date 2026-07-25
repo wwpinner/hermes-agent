@@ -18675,28 +18675,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return (evt_type, producer_id, started_at)
         return None
 
-    async def _classify_completion_target(self, parent_session_id: str) -> str:
-        """Classify an async-completion delivery target before adapter acceptance.
+    async def _classify_completion_target(
+        self,
+        parent_session_id: str,
+    ) -> tuple[str, str | None]:
+        """Classify a completion target and return its verified live session ID.
 
-        Returns one of:
-
-        - ``"deliver"`` — the spawning session is live, or ended by a
-          compression rotation with a verified live continuation. The inner
-          #55578 resolver (:meth:`_resolve_async_delegation_session`) still
-          owns the actual route retarget; this pre-flight only proves the
-          completion is deliverable so the durable ack stays honest.
-        - ``"terminal"`` — the spawning session is gone for good (unknown, or
-          ended at an explicit user boundary such as /new). Delivery can never
-          succeed; the durable row should be terminally dropped rather than
-          falsely acknowledged as delivered or replayed forever as pending.
-        - ``"retry"`` — transient uncertainty (session DB unavailable, lookup
-          error, or a compression rotation caught mid-flight before its
-          continuation exists). The claim should be released so a later
-          consumer can retry; the attempt cap bounds the churn.
+        The target ID matters for API-server completions: those self-post through
+        ``X-Hermes-Session-Id`` and bypass the inner gateway route resolver.
         """
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
-            return "retry"
+            return "retry", None
         try:
             parent = await session_db.get_session(parent_session_id)
         except Exception:
@@ -18704,29 +18694,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Async-completion pre-flight parent lookup failed for %s",
                 parent_session_id, exc_info=True,
             )
-            return "retry"
+            return "retry", None
         if parent is None:
-            return "terminal"
+            return "terminal", None
         if not parent.get("ended_at"):
-            return "deliver"
+            return "deliver", parent_session_id
         if parent.get("end_reason") != "compression":
-            return "terminal"
+            return "terminal", None
         try:
             tip_session_id = await session_db.get_compression_tip(parent_session_id)
             if not tip_session_id or tip_session_id == parent_session_id:
-                # Rotation caught mid-flight: parent is compression-ended but
-                # its continuation isn't visible yet. Retry, don't drop.
-                return "retry"
+                return "retry", None
             tip = await session_db.get_session(tip_session_id)
         except Exception:
             logger.debug(
                 "Async-completion pre-flight tip lookup failed for %s",
                 parent_session_id, exc_info=True,
             )
-            return "retry"
+            return "retry", None
         if tip is None or tip.get("ended_at"):
-            return "retry"
-        return "deliver"
+            return "retry", None
+        return "deliver", str(tip_session_id)
 
     async def _deliver_completion_notification(
         self, synth_text: str, evt: dict,
@@ -18767,7 +18755,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # would falsely acknowledge the durable row as delivered.
                 # Verify the target here, before acceptance, and give drops an
                 # honest durable disposition.
-                verdict = await self._classify_completion_target(parent_session_id)
+                verdict, target_session_id = await self._classify_completion_target(
+                    parent_session_id,
+                )
                 if verdict == "terminal":
                     logger.warning(
                         "Async delegation %s targets permanently-gone session %s; "
@@ -18802,6 +18792,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 exc_info=True,
                             )
                     return False
+                # API-server completions self-post through X-Hermes-Session-Id
+                # instead of passing through _resolve_async_delegation_session.
+                # Pin the wake to the already-validated live compression tip;
+                # posting to the ended raw parent can restart a closed-session
+                # append/retry loop.
+                if target_session_id and target_session_id != parent_session_id:
+                    origin_session_id = str(evt.get("origin_session_id") or "").strip()
+                    if origin_session_id == parent_session_id:
+                        evt["origin_session_id"] = target_session_id
+                    raw_session_key = str(evt.get("session_key") or "").strip()
+                    if raw_session_key == parent_session_id:
+                        evt["session_key"] = target_session_id
         if identity is not None:
             with self._completion_delivery_lock:
                 if (
