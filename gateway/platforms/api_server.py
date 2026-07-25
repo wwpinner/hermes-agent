@@ -131,6 +131,10 @@ RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT = 100
 _COMPRESSED_SUMMARY_METADATA_KEY = "_compressed_summary"
 
 
+class _CompressionContinuationUnavailable(RuntimeError):
+    """A closed compression parent has no verified live continuation yet."""
+
+
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
     try:
@@ -3275,6 +3279,23 @@ class APIServerAdapter(BasePlatformAdapter):
         fork = await asyncio.to_thread(db.get_session, fork_id) or {"id": fork_id, "parent_session_id": source_id}
         return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
 
+    async def _resolve_session_resume_target(self, db: Any, session_id: str) -> str:
+        """Resolve an API session header to a verified live compression tip."""
+        session_row = await asyncio.to_thread(db.get_session, session_id)
+        if not (
+            session_row is not None
+            and session_row.get("ended_at")
+            and session_row.get("end_reason") == "compression"
+        ):
+            return session_id
+        compression_tip = await asyncio.to_thread(db.get_compression_tip, session_id)
+        if not compression_tip or compression_tip == session_id:
+            raise _CompressionContinuationUnavailable(session_id)
+        tip_row = await asyncio.to_thread(db.get_session, compression_tip)
+        if tip_row is None or tip_row.get("ended_at"):
+            raise _CompressionContinuationUnavailable(session_id)
+        return str(compression_tip)
+
     @_admit_api_agent_request
     async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/chat — one synchronous agent turn."""
@@ -3285,6 +3306,19 @@ class APIServerAdapter(BasePlatformAdapter):
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
+        try:
+            db = await self._ensure_session_db_async()
+            if db is not None:
+                session_id = await self._resolve_session_resume_target(db, session_id)
+                session = await asyncio.to_thread(db.get_session, session_id)
+        except _CompressionContinuationUnavailable:
+            return web.json_response(
+                {
+                    "error": "session_continuation_unavailable",
+                    "message": "The compressed session continuation is not ready; retry this request.",
+                },
+                status=409,
+            )
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -3402,6 +3436,19 @@ class APIServerAdapter(BasePlatformAdapter):
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
+        try:
+            db = await self._ensure_session_db_async()
+            if db is not None:
+                session_id = await self._resolve_session_resume_target(db, session_id)
+                session = await asyncio.to_thread(db.get_session, session_id)
+        except _CompressionContinuationUnavailable:
+            return web.json_response(
+                {
+                    "error": "session_continuation_unavailable",
+                    "message": "The compressed session continuation is not ready; retry this request.",
+                },
+                status=409,
+            )
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -3759,7 +3806,21 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 db = await self._ensure_session_db_async()
                 if db is not None:
+                    # Clients can retain the pre-compression header after the
+                    # transcript rotates. Follow that exact lineage before
+                    # loading history or running the turn; resuming the ended
+                    # parent resurrects an oversized transcript and causes
+                    # durable writes to fail closed.
+                    session_id = await self._resolve_session_resume_target(db, session_id)
                     history = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+            except _CompressionContinuationUnavailable:
+                return web.json_response(
+                    {
+                        "error": "session_continuation_unavailable",
+                        "message": "The compressed session continuation is not ready; retry this request.",
+                    },
+                    status=409,
+                )
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []

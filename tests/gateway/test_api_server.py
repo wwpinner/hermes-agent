@@ -4677,6 +4677,45 @@ class TestSessionIdHeader:
             assert call_kwargs["session_id"] == "my-session-123"
 
     @pytest.mark.asyncio
+    async def test_compression_parent_header_resumes_live_tip(self, auth_adapter):
+        """A stale pre-compression header must never run against the ended parent."""
+        mock_result = {"final_response": "Continuing!", "messages": [], "api_calls": 1}
+        mock_db = MagicMock()
+        mock_db.get_session.side_effect = [
+            {
+                "id": "compressed-parent",
+                "ended_at": "2026-07-25T10:00:00Z",
+                "end_reason": "compression",
+            },
+            {"id": "live-child", "ended_at": None, "end_reason": None},
+        ]
+        mock_db.get_compression_tip.return_value = "live-child"
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "compressed context"},
+        ]
+        auth_adapter._session_db = mock_db
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-Session-Id": "compressed-parent",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "Continue"}]},
+                )
+
+        assert resp.status == 200
+        assert resp.headers.get("X-Hermes-Session-Id") == "live-child"
+        mock_db.get_messages_as_conversation.assert_called_once_with("live-child")
+        assert mock_run.call_args.kwargs["session_id"] == "live-child"
+
+    @pytest.mark.asyncio
     async def test_traversal_session_id_header_rejected(self, auth_adapter):
         """Security (#5958): a path-traversal X-Hermes-Session-Id must be
         rejected with 400 so it can't reach the filesystem artifact paths

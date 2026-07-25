@@ -236,6 +236,47 @@ def test_compression_parent_delivery_targets_tip_and_is_acked(
     assert durable["delivery_state"] == "delivered"
 
 
+def test_api_server_compression_completion_self_posts_to_live_tip(
+    monkeypatch, isolated_registry,
+):
+    """Negative regression: never self-post a wake to a compression-ended parent."""
+    from gateway import wake
+
+    event = _async_event("deleg_api_compression")
+    event.update({
+        "session_key": "sess_parent",
+        "origin_session_id": "sess_parent",
+        "parent_session_id": "sess_parent",
+    })
+    _persist_pending_completion(event)
+
+    adapter = SimpleNamespace(supports_async_delivery=False)
+    runner = _runner(adapter)
+    runner.adapters = {Platform.API_SERVER: adapter}
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(side_effect=lambda session_id: {
+            "sess_parent": {
+                "id": "sess_parent",
+                "ended_at": "2026-07-16T12:00:00",
+                "end_reason": "compression",
+            },
+            "sess_tip": {"id": "sess_tip", "ended_at": None, "end_reason": None},
+        }.get(session_id)),
+        get_compression_tip=AsyncMock(return_value="sess_tip"),
+    )
+    delivered = []
+
+    async def _capture_wake(_adapter, *, text, session_id="", source=None):
+        delivered.append((text, session_id, source))
+
+    monkeypatch.setattr(wake, "deliver_wake", _capture_wake)
+
+    assert asyncio.run(
+        runner._deliver_completion_notification("completion", event)
+    ) is True
+    assert delivered == [("completion", "sess_tip", None)]
+
+
 def test_explicit_reset_drop_is_terminal_not_falsely_delivered(
     monkeypatch, isolated_registry,
 ):
