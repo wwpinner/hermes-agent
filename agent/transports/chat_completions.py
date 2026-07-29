@@ -13,6 +13,7 @@ from typing import Any, Dict
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
+from agent.openrouter_zdr import enforce_openrouter_zdr
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
@@ -509,6 +510,11 @@ class ChatCompletionsTransport(ProviderTransport):
         if overrides:
             api_kwargs.update(overrides)
 
+        enforce_openrouter_zdr(
+            api_kwargs,
+            is_openrouter=bool(is_openrouter),
+            base_url=params.get("base_url"),
+        )
         return api_kwargs
 
     def _build_kwargs_from_profile(self, profile, model, sanitized, tools, params):
@@ -651,6 +657,14 @@ class ChatCompletionsTransport(ProviderTransport):
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
 
+        enforce_openrouter_zdr(
+            api_kwargs,
+            is_openrouter=(
+                bool(params.get("is_openrouter"))
+                or getattr(profile, "name", "") == "openrouter"
+            ),
+            base_url=params.get("base_url"),
+        )
         return api_kwargs
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:

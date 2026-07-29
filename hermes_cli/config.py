@@ -1599,6 +1599,8 @@ DEFAULT_CONFIG = {
     #   See: https://openrouter.ai/docs/guides/features/response-caching
     # response_cache_ttl: how long cached responses remain valid, in seconds (1-86400).
     #   Default 300 (5 minutes). Only used when response_cache is enabled.
+    # zdr: force provider.zdr=true on every OpenRouter inference request.
+    #   Enforced after per-request overrides so callers cannot weaken it.
     # min_coding_score: knob for the openrouter/pareto-code router (0.0-1.0).
     #   Only applied when model.model is "openrouter/pareto-code". Higher
     #   values route to stronger (more expensive) coders; lower values open
@@ -1610,6 +1612,7 @@ DEFAULT_CONFIG = {
     "openrouter": {
         "response_cache": True,
         "response_cache_ttl": 300,
+        "zdr": False,
         "min_coding_score": 0.65,
     },
 
@@ -7632,6 +7635,13 @@ def load_config_readonly() -> Dict[str, Any]:
     safety guarantee is purely documented, not enforced — be careful.
     """
     return _load_config_impl(want_deepcopy=False)
+
+
+def openrouter_zdr_enabled() -> bool:
+    """Return whether request-time OpenRouter ZDR enforcement is enabled."""
+    config = load_config_readonly()
+    section = config.get("openrouter")
+    return isinstance(section, dict) and section.get("zdr") is True
 
 
 def write_platform_config_field(
