@@ -108,7 +108,7 @@ def test_service_check_accepts_repo_python_without_override(
 ) -> None:
     repo = tmp_path / "runtime"
     repo.mkdir()
-    expected_python = str((repo / "venv" / "bin" / "python").resolve())
+    expected_python = str(repo / "venv" / "bin" / "python")
     monkeypatch.setattr(
         drc,
         "_service_properties",
@@ -125,10 +125,49 @@ def test_service_check_accepts_repo_python_without_override(
         lambda self: f"{expected_python}\0-m\0gateway.run\0".encode(),
     )
     monkeypatch.setattr(os, "readlink", lambda _path: str(repo))
+    real_run = drc._run
+
+    def _run(command, *, cwd=None):
+        if command and command[0] == expected_python:
+            assert cwd == Path("/")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=str(repo / "hermes_cli" / "__init__.py") + "\n",
+                stderr="",
+            )
+        return real_run(command, cwd=cwd)
+
+    monkeypatch.setattr(drc, "_run", _run)
 
     results = drc.check_service(repo, "hermes-gateway.service", allow_inactive=False)
 
     assert all(result.ok for result in results), results
+
+
+def test_service_check_rejects_expected_python_as_later_argument(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "runtime"
+    repo.mkdir()
+    expected_python = str(repo / "venv" / "bin" / "python")
+    monkeypatch.setattr(
+        drc,
+        "_service_properties",
+        lambda _service: {"ActiveState": "active", "MainPID": "1234"},
+    )
+    monkeypatch.setattr(drc, "_unit_text", lambda _service: "standard\n")
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: f"/usr/bin/python\0{expected_python}\0-m\0gateway.run\0".encode(),
+    )
+    monkeypatch.setattr(os, "readlink", lambda _path: str(repo))
+
+    results = drc.check_service(repo, "hermes-gateway.service", allow_inactive=False)
+    by_name = {result.name: result for result in results}
+
+    assert not by_name["service:hermes-gateway.service:process"].ok
 
 
 def test_service_check_rejects_worktree_pythonpath_override(

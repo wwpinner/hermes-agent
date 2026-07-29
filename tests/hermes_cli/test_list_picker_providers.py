@@ -63,8 +63,8 @@ def test_openrouter_models_replaced_with_live_catalog(monkeypatch):
     assert openrouter["total_models"] == 2
 
 
-def test_openrouter_falls_back_to_base_models_on_fetch_failure(monkeypatch):
-    """If the live catalog fetch raises, keep whatever base provided."""
+def test_openrouter_fetch_failure_drops_unverified_provider(monkeypatch):
+    """A policy-catalog exception must not restore public base models."""
     fallback_models = ["openai/gpt-5.4", "moonshotai/kimi-k2.6"]
     base = [_make_provider("openrouter", models=fallback_models)]
 
@@ -77,8 +77,7 @@ def test_openrouter_falls_back_to_base_models_on_fetch_failure(monkeypatch):
 
     result = model_switch.list_picker_providers(max_models=50)
 
-    assert len(result) == 1
-    assert result[0]["models"] == fallback_models
+    assert result == []
 
 
 def test_openrouter_empty_live_catalog_drops_row(monkeypatch):
