@@ -61,6 +61,44 @@ implements a carried patch, remove its active behavior with an explicit,
 reviewed commit and delete obsolete tests only when upstream has equivalent
 coverage.
 
+### Upstream root rewrites
+
+On 2026-07-29, before this candidate was deployed, upstream replaced `main`
+with the unrelated root
+`3334db67a47b3e74d49c2d96d2206d9bea42f65d`. The old reviewed candidate
+`74ec09316c6cd6d818ecd8b470ee1e15a19d7623` and the remote `runtime` branch
+were preserved while an isolated candidate branch was rebuilt from that exact
+new root. The 17 non-merge downstream commits were replayed in order; the old
+and new roots were not merged.
+
+Treat any future unrelated-root replacement as an exceptional release, not as
+a routine integration:
+
+1. Stop before changing the deployed checkout or remote runtime branch. Fetch
+   exact refs, record the old runtime tip, old pinned base, and new upstream
+   root, and require a clean isolated worktree.
+2. Preserve the old candidate under an immutable rollback tag or other
+   protected ref. Create a temporary integration branch directly at the new
+   upstream root; never merge the unrelated histories.
+3. Enumerate the downstream non-merge commits from the old pinned base through
+   the old candidate, replay them in logical order, and resolve conflicts by
+   retaining new upstream behavior plus each carried behavior contract. A
+   conflict that cannot be justified by tests blocks the release.
+4. Update `.downstream-runtime-base`, this document, and dependency resolution
+   only where the replay requires it. Run the full release verification and
+   compare the resulting downstream behavior and patch families with the old
+   candidate.
+5. Obtain immutable review of the exact rebuilt commit, including the recorded
+   old tip and new root. Do not amend or add commits after approval.
+6. Only after approval, replace the remote branch with an explicit lease bound
+   to the recorded old tip, for example
+   `git push --force-with-lease=refs/heads/runtime:<old-tip> origin <new-head>:runtime`.
+   Never use plain `--force`; if the lease fails, fetch and restart review
+   rather than overriding concurrent work.
+7. Verify the remote SHA before touching the stable checkout. Preserve the old
+   rollback ref through deployment and smoke verification; the rollback and
+   integrity-gate requirements below remain unchanged.
+
 Do not run plain `hermes update` in the runtime checkout because its default
 branch is `main`. Use:
 
