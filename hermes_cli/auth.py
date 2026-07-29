@@ -6931,6 +6931,60 @@ def _get_azure_foundry_auth_status() -> Dict[str, Any]:
     return info
 
 
+def resolve_openrouter_credentials(
+    explicit_api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve OpenRouter credentials from explicit, env, then pool sources."""
+    from hermes_cli.config import get_env_value_prefer_dotenv
+
+    candidates = (
+        (explicit_api_key, "explicit"),
+        (get_env_value_prefer_dotenv("OPENROUTER_API_KEY"), "OPENROUTER_API_KEY"),
+        # Backward compatibility: OpenRouter was historically Hermes's OpenAI-
+        # compatible default and accepted OPENAI_API_KEY for that endpoint.
+        (get_env_value_prefer_dotenv("OPENAI_API_KEY"), "OPENAI_API_KEY"),
+    )
+    for candidate, source in candidates:
+        key = str(candidate or "").strip()
+        if has_usable_secret(key):
+            return {
+                "provider": "openrouter",
+                "api_key": key,
+                "base_url": OPENROUTER_BASE_URL.rstrip("/"),
+                "source": source,
+            }
+
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool("openrouter")
+        entry = pool.peek() if pool and pool.has_credentials() else None
+        key = str(
+            (
+                getattr(entry, "runtime_api_key", None)
+                or getattr(entry, "access_token", "")
+            )
+            if entry is not None
+            else ""
+        ).strip()
+        if has_usable_secret(key):
+            return {
+                "provider": "openrouter",
+                "api_key": key,
+                "base_url": OPENROUTER_BASE_URL.rstrip("/"),
+                "source": str(getattr(entry, "source", "") or "credential_pool"),
+            }
+    except Exception:
+        pass
+
+    return {
+        "provider": "openrouter",
+        "api_key": "",
+        "base_url": OPENROUTER_BASE_URL.rstrip("/"),
+        "source": "default",
+    }
+
+
 def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve API key and base URL for an API-key provider.
 

@@ -117,23 +117,32 @@ def test_service_check_accepts_repo_python_without_override(
     monkeypatch.setattr(
         drc,
         "_unit_text",
-        lambda _service: f"ExecStart={expected_python} -m gateway.run\n",
+        lambda _service: (
+            f"ExecStart={expected_python} -m hermes_cli.main gateway run\n"
+        ),
     )
     monkeypatch.setattr(
         Path,
         "read_bytes",
-        lambda self: f"{expected_python}\0-m\0gateway.run\0".encode(),
+        lambda self: (
+            f"{expected_python}\0-m\0hermes_cli.main\0gateway\0run\0".encode()
+        ),
     )
     monkeypatch.setattr(os, "readlink", lambda _path: str(repo))
     real_run = drc._run
 
     def _run(command, *, cwd=None):
         if command and command[0] == expected_python:
-            assert cwd == Path("/")
+            assert cwd in {Path("/"), repo}
             return subprocess.CompletedProcess(
                 command,
                 0,
-                stdout=str(repo / "hermes_cli" / "__init__.py") + "\n",
+                stdout=(
+                    str(repo / "hermes_cli" / "__init__.py")
+                    + "\n"
+                    + str(repo / "gateway" / "__init__.py")
+                    + "\n"
+                ),
                 stderr="",
             )
         return real_run(command, cwd=cwd)
@@ -143,6 +152,113 @@ def test_service_check_accepts_repo_python_without_override(
     results = drc.check_service(repo, "hermes-gateway.service", allow_inactive=False)
 
     assert all(result.ok for result in results), results
+
+
+def test_service_check_accepts_dashboard_entrypoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "runtime"
+    repo.mkdir()
+    expected_python = str(repo / "venv" / "bin" / "python")
+    monkeypatch.setattr(
+        drc,
+        "_service_properties",
+        lambda _service: {"ActiveState": "active", "MainPID": "1234"},
+    )
+    monkeypatch.setattr(
+        drc,
+        "_unit_text",
+        lambda _service: (
+            f"ExecStart={expected_python} -m hermes_cli.main dashboard --no-open\n"
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (
+            f"{expected_python}\0-m\0hermes_cli.main\0dashboard\0--no-open\0".encode()
+        ),
+    )
+    monkeypatch.setattr(os, "readlink", lambda _path: str(repo.parent))
+    real_run = drc._run
+
+    def _run(command, *, cwd=None):
+        if command and command[0] == expected_python:
+            assert cwd in {Path("/"), repo.parent}
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    str(repo / "hermes_cli" / "__init__.py")
+                    + "\n"
+                    + str(repo / "gateway" / "__init__.py")
+                    + "\n"
+                ),
+                stderr="",
+            )
+        return real_run(command, cwd=cwd)
+
+    monkeypatch.setattr(drc, "_run", _run)
+
+    results = drc.check_service(
+        repo, "hermes-dashboard.service", allow_inactive=False
+    )
+
+    assert all(result.ok for result in results), results
+
+
+def test_service_check_rejects_stale_checkout_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "runtime"
+    repo.mkdir()
+    stale = tmp_path / "stale-checkout"
+    stale.mkdir()
+    expected_python = str(repo / "venv" / "bin" / "python")
+    monkeypatch.setattr(
+        drc,
+        "_service_properties",
+        lambda _service: {"ActiveState": "active", "MainPID": "1234"},
+    )
+    monkeypatch.setattr(
+        drc,
+        "_unit_text",
+        lambda _service: (
+            f"ExecStart={expected_python} -m hermes_cli.main gateway run\n"
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (
+            f"{expected_python}\0-m\0hermes_cli.main\0gateway\0run\0".encode()
+        ),
+    )
+    monkeypatch.setattr(os, "readlink", lambda _path: str(stale))
+    real_run = drc._run
+
+    def _run(command, *, cwd=None):
+        if command and command[0] == expected_python:
+            source = repo if cwd == Path("/") else stale
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    str(source / "hermes_cli" / "__init__.py")
+                    + "\n"
+                    + str(source / "gateway" / "__init__.py")
+                    + "\n"
+                ),
+                stderr="",
+            )
+        return real_run(command, cwd=cwd)
+
+    monkeypatch.setattr(drc, "_run", _run)
+
+    results = drc.check_service(repo, "hermes-gateway.service", allow_inactive=False)
+    by_name = {result.name: result for result in results}
+
+    assert not by_name["service:hermes-gateway.service:process"].ok
 
 
 def test_service_check_rejects_expected_python_as_later_argument(
