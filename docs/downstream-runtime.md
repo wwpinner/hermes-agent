@@ -50,8 +50,10 @@ other user data.
 6. Obtain an immutable frontier-model review of the exact candidate commit.
 7. Push the reviewed candidate to `origin/runtime` and verify the server SHA.
 8. Tag the previously deployed commit before updating the stable checkout.
-9. Update the stable checkout, refresh the supported gateway unit, restart
-   once, and run the post-deploy checks below.
+9. Update the stable checkout and remove only obsolete runtime-routing
+   overrides. If the base Gateway unit is stale, reinstall it without starting
+   a second daemon using `hermes gateway install --force --no-start-now`.
+   Restart once, then run the post-deploy checks below.
 
 For routine upstream integration, merge current `upstream/main` into
 `runtime`, resolve against the behavior tests, and push the resulting
@@ -140,7 +142,10 @@ The guard never reads process environments or credential files.
 1. Back up the installed unit and all drop-ins.
 2. Remove only the superseded worktree-routing drop-in.
 3. Run `systemctl --user daemon-reload`.
-4. Run `hermes gateway refresh` from the stable runtime checkout.
+4. If the base unit is stale or outdated, run
+   `hermes gateway install --force --no-start-now` from the stable runtime
+   checkout. There is no `hermes gateway refresh` subcommand. Skip this step
+   when the existing base unit already matches the supported unit.
 5. Restart the gateway once.
 6. Verify:
    - the runtime integrity gate passes;
@@ -163,7 +168,8 @@ on the fork. If post-deploy verification fails:
 
 1. stop after the failed smoke; do not improvise destructive recovery;
 2. switch the stable checkout to the known-good tag in detached mode;
-3. refresh/restart the affected service using that checkout;
+3. reinstall the base unit with `hermes gateway install --force --no-start-now`
+   only if it is stale, then restart the affected service using that checkout;
 4. repeat the live smoke checks;
 5. preserve the failed candidate and logs for diagnosis;
 6. return to branch `runtime` only after a corrected reviewed commit exists.
