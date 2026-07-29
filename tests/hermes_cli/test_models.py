@@ -70,6 +70,8 @@ class TestFetchOpenRouterModels:
                 return b'{"data":[{"id":"anthropic/claude-opus-4.8","pricing":{"prompt":"0.000015","completion":"0.000075"}},{"id":"qwen/qwen3.7-max","pricing":{"prompt":"0.000000325","completion":"0.00000195"}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"}}]}'
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_policy_catalog_cache", None)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
         with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
             models = fetch_openrouter_models(force_refresh=True)
 
@@ -80,15 +82,18 @@ class TestFetchOpenRouterModels:
         ]
 
 
-    def test_falls_back_to_static_snapshot_on_fetch_failure(self, monkeypatch):
+    def test_fails_closed_without_a_verified_or_stale_catalog(self, monkeypatch):
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache_scope_fp", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_policy_catalog_cache", None)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         # Pin the remote manifest out too — otherwise the fallback silently
         # depends on whatever the deployed catalog currently contains.
         with patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=None), \
              patch("hermes_cli.models._urlopen_model_catalog_request", side_effect=OSError("boom")):
             models = fetch_openrouter_models(force_refresh=True)
 
-        assert models == OPENROUTER_MODELS
+        assert models == []
 
     def test_filters_out_models_without_tool_support(self, monkeypatch):
         """Models whose supported_parameters omits 'tools' must not appear in the picker.
@@ -130,6 +135,8 @@ class TestFetchOpenRouterModels:
             ],
         )
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_policy_catalog_cache", None)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
         with (
             patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=[]),
             patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
@@ -167,12 +174,151 @@ class TestFetchOpenRouterModels:
                 )
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_policy_catalog_cache", None)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
         with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
             models = fetch_openrouter_models(force_refresh=True)
 
         ids = [mid for mid, _ in models]
         assert "anthropic/claude-opus-4.8" in ids
         assert "qwen/qwen3.7-max" in ids
+
+
+    def test_includes_additional_policy_eligible_tool_models(self, monkeypatch):
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        policy_catalog = {
+            "curated/model": {
+                "pricing": {"prompt": "0", "completion": "0"},
+                "supported_parameters": ["tools"],
+            },
+            "additional/tool-model": {
+                "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+                "supported_parameters": ["tools", "temperature"],
+            },
+            "additional/non-tool-model": {
+                "supported_parameters": ["temperature"],
+            },
+        }
+        with (
+            patch(
+                "hermes_cli.model_catalog.get_curated_openrouter_models",
+                return_value=[("curated/model", "")],
+            ),
+            patch(
+                "hermes_cli.models._fetch_openrouter_policy_catalog",
+                return_value=policy_catalog,
+            ),
+        ):
+            models = fetch_openrouter_models(force_refresh=True)
+
+        assert [model_id for model_id, _ in models] == [
+            "curated/model",
+            "additional/tool-model",
+        ]
+
+
+class TestOpenRouterPolicyCatalog:
+    def test_fetch_uses_authenticated_user_catalog_with_limit(self, monkeypatch):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data":[{"id":"account/model"}]}'
+
+        seen = {}
+
+        def _open(req, *, timeout):
+            seen["url"] = req.full_url
+            seen["authorization"] = req.get_header("Authorization")
+            return _Resp()
+
+        monkeypatch.setattr(_models_mod, "_openrouter_policy_catalog_cache", None)
+        with patch(
+            "hermes_cli.models._urlopen_model_catalog_request", side_effect=_open
+        ):
+            catalog = _models_mod._fetch_openrouter_policy_catalog(
+                force_refresh=True, api_key="test-key"
+            )
+
+        assert list(catalog or {}) == ["account/model"]
+        assert seen == {
+            "url": "https://openrouter.ai/api/v1/models/user?limit=500",
+            "authorization": "Bearer test-key",
+        }
+
+    def test_caches_are_partitioned_by_non_reversible_scope(self, monkeypatch):
+        class _Resp:
+            def __init__(self, model_id):
+                self.model_id = model_id
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    '{"data":[{"id":"%s","supported_parameters":["tools"]}]}'
+                    % self.model_id
+                ).encode()
+
+        calls = []
+
+        def _open(req, *, timeout):
+            authorization = req.get_header("Authorization")
+            calls.append(authorization)
+            suffix = "a" if authorization == "Bearer key-a" else "b"
+            return _Resp(f"account-{suffix}/model")
+
+        for name in (
+            "_openrouter_catalog_cache",
+            "_openrouter_catalog_cache_scope_fp",
+            "_openrouter_policy_catalog_cache",
+            "_openrouter_policy_catalog_cache_scope_fp",
+        ):
+            monkeypatch.setattr(_models_mod, name, None)
+        monkeypatch.setattr(
+            "hermes_cli.model_catalog.get_curated_openrouter_models", lambda: None
+        )
+        with patch(
+            "hermes_cli.models._urlopen_model_catalog_request", side_effect=_open
+        ):
+            first = fetch_openrouter_models(force_refresh=True, api_key="key-a")
+            second = fetch_openrouter_models(api_key="key-b")
+
+        assert [model_id for model_id, _ in first] == ["account-a/model"]
+        assert [model_id for model_id, _ in second] == ["account-b/model"]
+        assert calls == ["Bearer key-a", "Bearer key-b"]
+        assert "key-b" not in (_models_mod._openrouter_catalog_cache_scope_fp or "")
+
+    def test_direct_selection_is_fail_closed(self):
+        with patch(
+            "hermes_cli.models._openrouter_policy_model_ids",
+            return_value=["eligible/tool-model"],
+        ):
+            accepted = _models_mod.validate_requested_model(
+                "eligible/tool-model", "openrouter", api_key="key"
+            )
+            rejected = _models_mod.validate_requested_model(
+                "ineligible/model", "openrouter", api_key="key"
+            )
+        with patch(
+            "hermes_cli.models._openrouter_policy_model_ids", return_value=None
+        ):
+            unavailable = _models_mod.validate_requested_model(
+                "eligible/tool-model", "openrouter", api_key="key"
+            )
+
+        assert accepted["accepted"] is True
+        assert rejected["accepted"] is False
+        assert unavailable["accepted"] is False
+        assert unavailable["persist"] is False
 
 
 class TestOpenRouterToolSupportHelper:

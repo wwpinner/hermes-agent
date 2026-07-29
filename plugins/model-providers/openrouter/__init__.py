@@ -9,7 +9,6 @@ from providers.base import ProviderProfile
 
 logger = logging.getLogger(__name__)
 
-_CACHE: list[str] | None = None
 
 # Anthropic model families that still accept an explicit "disable thinking"
 # request (the manual ``thinking: {type: "disabled"}`` form OpenRouter emits
@@ -55,21 +54,19 @@ class OpenRouterProfile(ProviderProfile):
         base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
-        """Fetch from public OpenRouter catalog — no auth required.
+        """Fetch from OpenRouter's authenticated, policy-filtered catalog.
 
         Note: Tool-call capability filtering is applied by hermes_cli/models.py
         via fetch_openrouter_models() → _openrouter_model_supports_tools(), not
         here. The picker early-returns via the dedicated openrouter path before
         reaching this method, so filtering here would be unreachable.
         """
-        global _CACHE  # noqa: PLW0603
-        if _CACHE is not None:
-            return _CACHE
         try:
-            result = super().fetch_models(api_key=None, base_url=base_url, timeout=timeout)
-            if result is not None:
-                _CACHE = result
-            return result
+            # The canonical picker cache is credential/endpoint scoped. Keep no
+            # second profile-local cache that could survive a key rotation.
+            return super().fetch_models(
+                api_key=api_key, base_url=base_url, timeout=timeout
+            )
         except Exception as exc:
             logger.debug("fetch_models(openrouter): %s", exc)
             return None
@@ -199,7 +196,7 @@ openrouter = OpenRouterProfile(
     description="OpenRouter — unified API for 200+ models",
     signup_url="https://openrouter.ai/keys",
     base_url="https://openrouter.ai/api/v1",
-    models_url="https://openrouter.ai/api/v1/models",
+    models_url="https://openrouter.ai/api/v1/models/user?limit=500",
     fallback_models=(
         "anthropic/claude-sonnet-4.6",
         "openai/gpt-5.4",
