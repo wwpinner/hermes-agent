@@ -34,7 +34,7 @@ FAKE_API_MODELS = [
 
 
 def _validate(model, provider="openrouter", api_models=FAKE_API_MODELS, **kw):
-    """Shortcut: call validate_requested_model with mocked API."""
+    """Shortcut: call validation with mocked live and policy catalogs."""
     probe_payload = {
         "models": api_models,
         "probed_url": "http://localhost:11434/v1/models",
@@ -43,7 +43,8 @@ def _validate(model, provider="openrouter", api_models=FAKE_API_MODELS, **kw):
         "used_fallback": False,
     }
     with patch("hermes_cli.models.fetch_api_models", return_value=api_models), \
-         patch("hermes_cli.models.probe_api_models", return_value=probe_payload):
+         patch("hermes_cli.models.probe_api_models", return_value=probe_payload), \
+         patch("hermes_cli.models._openrouter_policy_model_ids", return_value=api_models):
         return validate_requested_model(model, provider, **kw)
 
 
@@ -674,27 +675,29 @@ class TestValidateApiFallback:
     """
 
     def test_known_model_accepted_via_catalog_when_api_down(self):
-        # Force the openrouter catalog lookup to return a deterministic list.
-        with patch(
-            "hermes_cli.models.provider_model_ids",
-            return_value=["anthropic/claude-opus-4.6", "openai/gpt-5.4"],
-        ):
-            result = _validate("anthropic/claude-opus-4.6", api_models=None)
+        result = _validate(
+            "anthropic/claude-opus-4.6",
+            api_models=["anthropic/claude-opus-4.6", "openai/gpt-5.4"],
+        )
         assert result["accepted"] is True
         assert result["persist"] is True
         assert result["recognized"] is True
 
-    def test_unknown_model_accepted_with_note_when_api_down(self):
-        with patch(
-            "hermes_cli.models.provider_model_ids",
-            return_value=["anthropic/claude-opus-4.6", "openai/gpt-5.4"],
-        ):
-            result = _validate("anthropic/claude-next-gen", api_models=None)
-        assert result["accepted"] is True
-        assert result["persist"] is True
+    def test_unknown_model_rejected_by_policy_catalog(self):
+        result = _validate(
+            "anthropic/claude-next-gen",
+            api_models=["anthropic/claude-opus-4.6", "openai/gpt-5.4"],
+        )
+        assert result["accepted"] is False
+        assert result["persist"] is False
         assert result["recognized"] is False
-        # Message flags it as unverified against the catalog.
-        assert "not found" in result["message"].lower() or "note" in result["message"].lower()
+        assert "not found" in result["message"].lower()
+
+    def test_unavailable_policy_catalog_fails_closed(self):
+        result = _validate("anthropic/claude-opus-4.6", api_models=None)
+        assert result["accepted"] is False
+        assert result["persist"] is False
+        assert "could not verify" in result["message"].lower()
 
     def test_zai_known_model_accepted_via_catalog_when_api_down(self):
         # glm-5 is in the zai curated catalog (_PROVIDER_MODELS["zai"]).
