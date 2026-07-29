@@ -1,5 +1,6 @@
 """Tests for the hermes_cli models module."""
 
+import json
 from unittest.mock import patch, MagicMock
 
 from hermes_cli.nous_account import NousPortalAccountInfo
@@ -58,6 +59,74 @@ class TestOpenRouterModels:
 
 
 class TestFetchOpenRouterModels:
+    def test_uses_pool_only_credential_for_policy_catalog(
+        self, tmp_path, monkeypatch
+    ):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data":[{"id":"pool/model","supported_parameters":["tools"]}]}'
+
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "credential_pool": {
+                        "openrouter": [
+                            {
+                                "id": "pool-key",
+                                "label": "pool-only",
+                                "auth_type": "api_key",
+                                "priority": 0,
+                                "source": "manual",
+                                "access_token": "sk-or-pool-test-key",
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        for name in (
+            "_openrouter_catalog_cache",
+            "_openrouter_catalog_cache_scope_fp",
+            "_openrouter_policy_catalog_cache",
+            "_openrouter_policy_catalog_cache_scope_fp",
+        ):
+            monkeypatch.setattr(_models_mod, name, None)
+        seen = {}
+
+        def _open(req, *, timeout):
+            seen["authorization"] = req.get_header("Authorization")
+            return _Resp()
+
+        with (
+            patch(
+                "hermes_cli.model_catalog.get_curated_openrouter_models",
+                return_value=None,
+            ),
+            patch(
+                "hermes_cli.models._urlopen_model_catalog_request",
+                side_effect=_open,
+            ),
+        ):
+            models = _models_mod.provider_model_ids(
+                "openrouter", force_refresh=True
+            )
+
+        assert models == ["pool/model"]
+        assert seen["authorization"] == "Bearer sk-or-pool-test-key"
+
     def test_live_fetch_recomputes_free_tags(self, monkeypatch):
         class _Resp:
             def __enter__(self):

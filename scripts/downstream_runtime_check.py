@@ -219,34 +219,58 @@ def check_service(
     }
     argv0 = os.path.abspath(argv[0]) if argv else ""
     process_uses_repo = argv0 in expected_python
+    expected_module_args = {
+        "hermes-gateway.service": ("-m", "hermes_cli.main", "gateway", "run"),
+        "hermes-dashboard.service": ("-m", "hermes_cli.main", "dashboard"),
+    }.get(service, ("-m", "hermes_cli.main"))
+    process_has_expected_entrypoint = tuple(
+        argv[1 : 1 + len(expected_module_args)]
+    ) == expected_module_args
+    approved_cwds = {repo, repo.parent.resolve()}
+    process_has_approved_cwd = cwd in approved_cwds
     process_uses_worktree = (
         any("/worktrees/" in arg.lower() for arg in argv)
         or "/worktrees/" in str(cwd).lower()
     )
 
-    imported_from_repo = False
-    if process_uses_repo:
+    def _probe_imports(probe_cwd: Path) -> bool:
         probe = _run(
             (
                 argv0,
                 "-c",
-                "from pathlib import Path; import hermes_cli; "
-                "print(Path(hermes_cli.__file__).resolve())",
+                "from pathlib import Path; import gateway, hermes_cli; "
+                "print(Path(hermes_cli.__file__).resolve()); "
+                "print(Path(gateway.__file__).resolve())",
             ),
-            # Probe outside the checkout. Using cwd=repo would let sys.path[0]
-            # mask a stale or incorrect editable installation.
-            cwd=Path("/"),
+            cwd=probe_cwd,
         )
-        if probe.returncode == 0 and probe.stdout.strip():
+        paths = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
+        if probe.returncode != 0 or len(paths) != 2:
+            return False
+        for path in paths:
             try:
-                Path(probe.stdout.strip()).resolve().relative_to(repo)
-                imported_from_repo = True
+                Path(path).resolve().relative_to(repo)
             except ValueError:
-                pass
+                return False
+        return True
+
+    installed_imports_repo = False
+    startup_imports_repo = False
+    if process_uses_repo:
+        # Probe outside the checkout so sys.path[0] cannot mask a stale or
+        # incorrect editable installation, then repeat from the active
+        # process cwd to reproduce the service's -m import resolution.
+        installed_imports_repo = _probe_imports(Path("/"))
+        startup_imports_repo = _probe_imports(cwd)
     _record(
         results,
         f"service:{service}:process",
-        process_uses_repo and imported_from_repo and not process_uses_worktree,
+        process_uses_repo
+        and process_has_expected_entrypoint
+        and process_has_approved_cwd
+        and installed_imports_repo
+        and startup_imports_repo
+        and not process_uses_worktree,
         f"pid={pid} cwd={cwd}",
     )
     return results

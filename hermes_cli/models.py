@@ -1471,6 +1471,23 @@ def _openrouter_model_supports_tools(item: Any) -> bool:
     return "tools" in params
 
 
+def _resolve_openrouter_catalog_credential(api_key: str | None = None) -> str:
+    """Resolve the effective OpenRouter key through the runtime auth chain."""
+    explicit = str(api_key or "").strip()
+    if explicit:
+        return explicit
+    try:
+        from hermes_cli.auth import resolve_openrouter_credentials
+
+        credentials = resolve_openrouter_credentials()
+        resolved = str(credentials.get("api_key") or "").strip()
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return os.getenv("OPENROUTER_API_KEY", "").strip()
+
+
 def _fetch_openrouter_policy_catalog(
     timeout: float = 8.0,
     *,
@@ -1485,7 +1502,7 @@ def _fetch_openrouter_policy_catalog(
     global _openrouter_policy_catalog_cache, _openrouter_policy_catalog_cache_at
     global _openrouter_policy_catalog_cache_scope_fp
 
-    credential = (api_key or os.getenv("OPENROUTER_API_KEY", "")).strip()
+    credential = _resolve_openrouter_catalog_credential(api_key)
     if not credential:
         return None
     scope_fp = _openrouter_policy_scope_fingerprint(
@@ -1569,7 +1586,7 @@ def fetch_openrouter_models(
     global _openrouter_catalog_cache, _openrouter_catalog_cache_at
     global _openrouter_catalog_cache_scope_fp
 
-    credential = (api_key or os.getenv("OPENROUTER_API_KEY", "")).strip()
+    credential = _resolve_openrouter_catalog_credential(api_key)
     scope_fp = (
         _openrouter_policy_scope_fingerprint(
             credential, _OPENROUTER_USER_MODELS_URL
