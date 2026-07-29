@@ -83,6 +83,26 @@ def test_repo_check_rejects_dirty_or_unpublished_runtime(tmp_path: Path) -> None
     assert not by_name["published-head"].ok
 
 
+def test_repo_check_uses_pinned_upstream_base_not_moving_tip(tmp_path: Path) -> None:
+    repo = _runtime_repo(tmp_path)
+    pinned = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "commit", "--allow-empty", "-q", "-m", "newer upstream")
+    moving_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/upstream/main", moving_tip)
+    _git(repo, "reset", "--hard", "-q", pinned)
+
+    results = drc.check_repo(
+        repo,
+        branch="runtime",
+        expected_origin="wwpinner/hermes-agent",
+        expected_upstream="NousResearch/hermes-agent",
+        allow_unpublished=False,
+        upstream_base=pinned,
+    )
+
+    assert all(result.ok for result in results), results
+
+
 def test_service_check_accepts_repo_python_without_override(
     tmp_path: Path, monkeypatch
 ) -> None:

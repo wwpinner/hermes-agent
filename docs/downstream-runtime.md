@@ -43,7 +43,8 @@ other user data.
 2. Create an isolated integration worktree from current `upstream/main`.
 3. Reproduce every carried behavior against untouched upstream. Drop a patch
    when upstream now satisfies its behavior contract.
-4. Port only the remaining behavior as separate conventional commits.
+4. Port only the remaining behavior as separate conventional commits and
+   update `.downstream-runtime-base` to that fetched upstream commit.
 5. Run targeted Python suites with `scripts/run_tests.sh`; run relevant JS
    checks, tests, and builds from the root workspace.
 6. Obtain an immutable frontier-model review of the exact candidate commit.
@@ -88,7 +89,8 @@ The guard fails when:
 - the checkout is dirty, detached, or on the wrong branch;
 - the remotes do not match the fork topology;
 - local `HEAD` differs from `origin/runtime`;
-- the candidate does not contain fetched `upstream/main`;
+- the candidate does not contain the upstream commit pinned in
+  `.downstream-runtime-base`;
 - the gateway is inactive;
 - the unit contains `PYTHONPATH` or a `/worktrees/` path;
 - the gateway process is not launched by the stable checkout's Python.
