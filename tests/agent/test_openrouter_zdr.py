@@ -1,3 +1,5 @@
+import pytest
+
 from agent.auxiliary_client import _build_call_kwargs
 from agent.chat_completion_helpers import _enforce_summary_openrouter_zdr
 from agent.openrouter_zdr import enforce_openrouter_zdr
@@ -85,3 +87,20 @@ def test_disabled_zdr_preserves_caller_policy(monkeypatch):
     )
 
     assert kwargs["extra_body"]["provider"]["zdr"] is False
+
+
+def test_config_read_failure_aborts_openrouter_request(monkeypatch):
+    def _raise():
+        raise PermissionError("config unavailable")
+
+    monkeypatch.setattr("hermes_cli.config.openrouter_zdr_enabled", _raise)
+    kwargs = {}
+
+    with pytest.raises(RuntimeError, match="refusing to build the request"):
+        enforce_openrouter_zdr(
+            kwargs,
+            is_openrouter=True,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    assert kwargs == {}

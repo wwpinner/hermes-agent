@@ -2931,7 +2931,9 @@ def list_picker_providers(
                 live = fetch_openrouter_models()
                 live_ids = [mid for mid, _ in live]
             except Exception:
-                live_ids = list(p.get("models", []))
+                # Account policy could not be verified. Never restore the
+                # public/unfiltered base list into an interactive picker.
+                live_ids = []
             p = dict(p)
             p["models"] = live_ids[:max_models] if max_models is not None else live_ids
             p["total_models"] = len(live_ids)

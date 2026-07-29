@@ -202,29 +202,51 @@ def check_service(
         return results
 
     try:
-        cmdline = (
-            Path(f"/proc/{pid}/cmdline")
-            .read_bytes()
-            .replace(b"\0", b" ")
-            .decode("utf-8", errors="replace")
-        )
+        raw_cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        argv = [
+            part.decode("utf-8", errors="replace")
+            for part in raw_cmdline.split(b"\0")
+            if part
+        ]
         cwd = Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
     except OSError as exc:
         _record(results, f"service:{service}:process", False, str(exc))
         return results
 
     expected_python = {
-        str((repo / "venv" / "bin" / "python").resolve()),
-        str((repo / ".venv" / "bin" / "python").resolve()),
+        os.path.abspath(repo / "venv" / "bin" / "python"),
+        os.path.abspath(repo / ".venv" / "bin" / "python"),
     }
-    process_uses_repo = any(path in cmdline for path in expected_python)
+    argv0 = os.path.abspath(argv[0]) if argv else ""
+    process_uses_repo = argv0 in expected_python
     process_uses_worktree = (
-        "/worktrees/" in cmdline.lower() or "/worktrees/" in str(cwd).lower()
+        any("/worktrees/" in arg.lower() for arg in argv)
+        or "/worktrees/" in str(cwd).lower()
     )
+
+    imported_from_repo = False
+    if process_uses_repo:
+        probe = _run(
+            (
+                argv0,
+                "-c",
+                "from pathlib import Path; import hermes_cli; "
+                "print(Path(hermes_cli.__file__).resolve())",
+            ),
+            # Probe outside the checkout. Using cwd=repo would let sys.path[0]
+            # mask a stale or incorrect editable installation.
+            cwd=Path("/"),
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            try:
+                Path(probe.stdout.strip()).resolve().relative_to(repo)
+                imported_from_repo = True
+            except ValueError:
+                pass
     _record(
         results,
         f"service:{service}:process",
-        process_uses_repo and not process_uses_worktree,
+        process_uses_repo and imported_from_repo and not process_uses_worktree,
         f"pid={pid} cwd={cwd}",
     )
     return results

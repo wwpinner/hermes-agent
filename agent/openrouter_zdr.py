@@ -25,8 +25,11 @@ def enforce_openrouter_zdr(
 
         if not openrouter_zdr_enabled():
             return
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not determine the configured OpenRouter ZDR policy; "
+            "refusing to build the request."
+        ) from exc
 
     raw_extra = api_kwargs.get("extra_body")
     extra_body = dict(raw_extra) if isinstance(raw_extra, dict) else {}

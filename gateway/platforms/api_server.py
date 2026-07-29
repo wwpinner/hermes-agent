@@ -3852,14 +3852,15 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id = provided_session_id
             try:
                 db = await self._ensure_session_db_async()
-                if db is not None:
-                    # Clients can retain the pre-compression header after the
-                    # transcript rotates. Follow that exact lineage before
-                    # loading history or running the turn; resuming the ended
-                    # parent resurrects an oversized transcript and causes
-                    # durable writes to fail closed.
-                    session_id = await self._resolve_session_resume_target(db, session_id)
-                    history = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+                if db is None:
+                    raise RuntimeError("SessionDB unavailable")
+                # Clients can retain the pre-compression header after the
+                # transcript rotates. Follow that exact lineage before
+                # loading history or running the turn; resuming the ended
+                # parent resurrects an oversized transcript and causes
+                # durable writes to fail closed.
+                session_id = await self._resolve_session_resume_target(db, session_id)
+                history = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
             except _CompressionContinuationUnavailable:
                 return web.json_response(
                     {
@@ -3870,7 +3871,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
-                history = []
+                return web.json_response(
+                    {
+                        "error": "session_resume_failed",
+                        "message": "Session history could not be verified; retry this request.",
+                    },
+                    status=503,
+                    headers={"Retry-After": "1"},
+                )
         else:
             # Derive a stable session ID from the conversation fingerprint so
             # that consecutive messages from the same Open WebUI (or similar)
