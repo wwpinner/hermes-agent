@@ -4967,6 +4967,17 @@ def validate_requested_model(
                 "recognized": True,
                 "message": None,
             }
+        auto = get_close_matches(
+            requested_for_lookup, eligible_models, n=1, cutoff=0.9
+        )
+        if auto:
+            return {
+                "accepted": True,
+                "persist": True,
+                "recognized": True,
+                "corrected_model": auto[0],
+                "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+            }
         suggestions = get_close_matches(
             requested_for_lookup, eligible_models, n=3, cutoff=0.5
         )
@@ -4980,7 +4991,7 @@ def validate_requested_model(
             "persist": False,
             "recognized": False,
             "message": (
-                f"`{requested}` is not available under the current OpenRouter "
+                f"`{requested}` was not found under the current OpenRouter "
                 f"provider/privacy/guardrail policy and was not selected."
                 f"{suggestion_text}"
             ),
