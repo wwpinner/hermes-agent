@@ -7423,6 +7423,21 @@ def _build_call_kwargs(
         ):
             kwargs["_reasoning_config"] = dict(reasoning_config)
 
+    # Auxiliary and compression calls invoke the SDK directly. Enforce after
+    # all profile/caller merges so an explicit false cannot weaken the policy.
+    from agent.openrouter_zdr import enforce_openrouter_zdr
+
+    provider_norm = _normalize_aux_provider(provider)
+    enforce_openrouter_zdr(
+        kwargs,
+        is_openrouter=(
+            provider_norm == "openrouter"
+            or base_url_host_matches(effective_base, "openrouter.ai")
+            or "(openrouter)" in str(provider or "").strip().lower()
+        ),
+        base_url=effective_base,
+    )
+
     return kwargs
 
 

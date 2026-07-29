@@ -133,6 +133,56 @@ class TestOpenRouterProfile:
         body = p.build_extra_body()
         assert body == {}
 
+    def test_transport_enforces_zdr_after_request_overrides(self, monkeypatch):
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        monkeypatch.setattr("hermes_cli.config.openrouter_zdr_enabled", lambda: True)
+        profile = get_provider_profile("openrouter")
+        assert profile is not None
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="deepseek/deepseek-chat",
+            messages=[{"role": "user", "content": "ping"}],
+            provider_profile=profile,
+            extra_body_additions={"provider": {"sort": "price", "zdr": False}},
+            request_overrides={
+                "extra_body": {"provider": {"only": ["deepinfra"], "zdr": False}}
+            },
+        )
+
+        assert kwargs["extra_body"]["provider"] == {
+            "only": ["deepinfra"],
+            "zdr": True,
+        }
+
+    def test_transport_omits_zdr_when_disabled(self, monkeypatch):
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        monkeypatch.setattr("hermes_cli.config.openrouter_zdr_enabled", lambda: False)
+        profile = get_provider_profile("openrouter")
+        assert profile is not None
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="deepseek/deepseek-chat",
+            messages=[{"role": "user", "content": "ping"}],
+            provider_profile=profile,
+        )
+
+        assert "extra_body" not in kwargs
+
+    def test_transport_does_not_apply_zdr_to_native_gemini(self, monkeypatch):
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        monkeypatch.setattr("hermes_cli.config.openrouter_zdr_enabled", lambda: True)
+        profile = get_provider_profile("openrouter")
+        assert profile is not None
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="gemini-2.5-flash",
+            messages=[{"role": "user", "content": "ping"}],
+            provider_profile=profile,
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+        )
+
+        assert "provider" not in kwargs.get("extra_body", {})
+
     def test_aux_call_inherits_ambient_conversation_as_sticky_key(self):
         """Auxiliary calls pass no session_id but must still route stickily.
 

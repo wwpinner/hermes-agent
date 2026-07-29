@@ -3518,6 +3518,13 @@ def load_config_readonly() -> Dict[str, Any]:
     return _load_config_impl(want_deepcopy=False)
 
 
+def openrouter_zdr_enabled() -> bool:
+    """Return whether request-time OpenRouter ZDR enforcement is enabled."""
+    config = load_config_readonly()
+    section = config.get("openrouter")
+    return isinstance(section, dict) and section.get("zdr") is True
+
+
 def write_platform_config_field(
     platform_key: str,
     field_key: str,
