@@ -73,6 +73,7 @@ def check_repo(
     expected_origin: str,
     expected_upstream: str,
     allow_unpublished: bool,
+    upstream_base: str | None = None,
 ) -> list[CheckResult]:
     results: list[CheckResult] = []
     try:
@@ -112,7 +113,8 @@ def check_repo(
         _record(results, "published-head", allow_unpublished, str(exc))
 
     try:
-        upstream_head = _git(repo, "rev-parse", "refs/remotes/upstream/main")
+        upstream_ref = upstream_base or "refs/remotes/upstream/main"
+        upstream_head = _git(repo, "rev-parse", upstream_ref)
         ancestry = _run(
             ("git", "merge-base", "--is-ancestor", upstream_head, head), cwd=repo
         )
@@ -120,7 +122,7 @@ def check_repo(
             results,
             "upstream-contained",
             ancestry.returncode == 0,
-            f"upstream/main={upstream_head[:12]} HEAD={head[:12]}",
+            f"base={upstream_head[:12]} HEAD={head[:12]}",
         )
     except RuntimeError as exc:
         _record(results, "upstream-contained", False, str(exc))
@@ -265,12 +267,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
 
     try:
+        base_file = repo / ".downstream-runtime-base"
+        upstream_base = (
+            base_file.read_text(encoding="utf-8").strip()
+            if base_file.is_file()
+            else None
+        )
         results = check_repo(
             repo,
             branch=args.branch,
             expected_origin=args.origin,
             expected_upstream=args.upstream,
             allow_unpublished=args.allow_unpublished,
+            upstream_base=upstream_base,
         )
         for service in args.service:
             results.extend(
