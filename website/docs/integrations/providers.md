@@ -1452,6 +1452,27 @@ provider_routing:
 
 **Shortcuts:** Append `:nitro` to any model name for throughput sorting (e.g., `anthropic/claude-sonnet-4:nitro`), or `:floor` for price sorting.
 
+### Zero Data Retention
+
+Enable request-time Zero Data Retention from the dashboard's **Models** page,
+or set it directly in `~/.hermes/config.yaml`:
+
+```yaml
+openrouter:
+  zdr: true
+```
+
+When enabled, Hermes forces `provider.zdr: true` on every OpenRouter request,
+including auxiliary tasks, summaries, compression, and delegated agents. This
+final-wire policy cannot be weakened by a per-task or per-request
+`provider.zdr: false` override. It complements OpenRouter account privacy and
+guardrail settings rather than replacing them.
+
+Hermes also builds the OpenRouter model picker from the authenticated
+`/api/v1/models/user` policy catalog. The picker lists all eligible models that
+support tools and fails closed if account eligibility cannot be verified; it
+never substitutes the unfiltered public catalog for direct model selection.
+
 ## OpenRouter Pareto Code Router
 
 OpenRouter ships an experimental coding-model router at `openrouter/pareto-code` that auto-routes requests to the cheapest model meeting a coding-quality bar (ranked by [Artificial Analysis](https://artificialanalysis.ai/)). Pick this model and tune the `min_coding_score` knob in `~/.hermes/config.yaml`:
