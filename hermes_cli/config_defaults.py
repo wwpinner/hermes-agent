@@ -10,6 +10,16 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    # SQLite journal mode used by every Hermes database opener. WAL is the
+    # normal default; set DELETE for weak-fsync/shared filesystems where WAL is
+    # not crash-safe (for example macOS virtiofs, NFS, or SMB).
+    "database": {
+        "journal_mode": "wal",
+        # Optional WAL sizing pragmas, applied when set to integers.
+        # None = SQLite defaults (autocheckpoint 1000 pages, no size limit).
+        "wal_autocheckpoint": None,
+        "journal_size_limit": None,
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.
     "max_concurrent_sessions": None,
@@ -284,7 +294,10 @@ DEFAULT_CONFIG = {
         "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
         "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
         "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
-        # Container resource limits (docker, singularity, modal, daytona — ignored for local/ssh)
+        # Vercel Sandbox runtime (vercel_sandbox backend only).
+        # Supported: node24, node22, python3.13.
+        "vercel_runtime": "node24",
+        # Container resource limits (docker, singularity, modal, daytona, vercel_sandbox — ignored for local/ssh)
         "container_cpu": 1,
         "container_memory": 5120,       # MB (default 5GB)
         "container_disk": 51200,        # MB (default 50GB)
@@ -1092,7 +1105,10 @@ DEFAULT_CONFIG = {
         # only visible when show_reasoning is enabled.
         "show_commentary": True,
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
-        "tool_progress_overrides": {},  # DEPRECATED — use display.platforms instead
+        # NOTE: display.tool_progress_overrides is deprecated and no longer
+        # seeded here — use display.platforms. A user-set value is still
+        # honored at runtime (gateway display_config back-compat read) and
+        # folded into display.platforms by the v15→16 migration.
         "tool_preview_length": 0,  # Max chars for tool call previews (0 = no limit, show full paths/commands)
         # Human-phrased tool status labels for built-in tools: "Searching the
         # web for ...", "Reading <file>", "Browsing <url>" instead of the raw
@@ -1452,8 +1468,9 @@ DEFAULT_CONFIG = {
         "thinking_sound": True,       # Calm ambient bubble sound while the agent works in voice chat (volume follows beep_volume)
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop
-        "barge_in": True,             # Stop TTS playback when the user starts talking
-        "barge_in_grace_seconds": 2.0,  # Delay before the barge mic opens so VAD calibrates against live TTS playback (0 disables)
+        "barge_in": True,             # Interrupt the agent / stop TTS when the user starts talking
+        "barge_in_grace_seconds": 0.5,  # Trip suppression right after TTS playback starts (onset transient); the mic itself is live for the whole turn
+        "barge_in_threshold_multiplier": 3.0,  # Speech trigger = quiet-room floor x this (floor is calibrated BEFORE playback, never against speaker bleed)
         # Saying EXACTLY one of these phrases (and nothing else) ends the
         # voice chat instead of being sent to the agent. Case-insensitive,
         # surrounding punctuation ignored. Set [] to disable.
@@ -1466,6 +1483,7 @@ DEFAULT_CONFIG = {
     "wake_word": {
         "enabled": False,
         "surface": "auto",            # eligible surface: "auto" (first claimant) | "cli" | "tui" | "gui"
+        "input_device": None,          # PortAudio input device index/name; null uses the process default
         "provider": "openwakeword",   # "openwakeword" (free, local) | "sherpa" (free, ANY phrase, no training) | "porcupine" (premium; needs PORCUPINE_ACCESS_KEY)
         "phrase": "hey hermes",       # for "sherpa" this IS the detected phrase (any text works); for other engines it's a cosmetic label — detection is keyed by the model/keyword below
         "sensitivity": 0.6,           # 0.0-1.0 detection threshold, consistent across engines (higher = stricter, fewer false triggers)
@@ -4144,13 +4162,15 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "setting",
     },
-    # HERMES_TOOL_PROGRESS and HERMES_TOOL_PROGRESS_MODE are deprecated —
-    # now configured via display.tool_progress in config.yaml (off|new|all|verbose|log).
-    # The gateway still falls back to these env vars for backward compatibility,
-    # so they live in _EXTRA_ENV_KEYS (known to reload and compatibility paths) but
-    # are intentionally NOT listed here: OPTIONAL_ENV_VARS feeds user-facing
-    # surfaces (dashboard keys page, setup checklists) and deprecated knobs
-    # shouldn't be offered there.
+    # HERMES_TOOL_PROGRESS_MODE is deprecated — tool progress is configured via
+    # display.tool_progress in config.yaml (off|new|all|verbose|log). The
+    # gateway still falls back to HERMES_TOOL_PROGRESS_MODE for backward
+    # compatibility, so it lives in _EXTRA_ENV_KEYS (known to reload and
+    # compatibility paths) but is intentionally NOT listed here:
+    # OPTIONAL_ENV_VARS feeds user-facing surfaces (dashboard keys page, setup
+    # checklists) and deprecated knobs shouldn't be offered there. The boolean
+    # HERMES_TOOL_PROGRESS is fully unsupported since the v12 config support
+    # floor retired its only consumer (the v3→4 migration).
     "HERMES_PREFILL_MESSAGES_FILE": {
         "description": "Path to JSON file with ephemeral prefill messages for few-shot priming",
         "prompt": "Prefill messages file path",

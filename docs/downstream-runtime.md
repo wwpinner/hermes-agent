@@ -1,10 +1,14 @@
 # Downstream Runtime Branch
 
-Last verified: 2026-07-29
+Last verified: 2026-07-30
 
 This fork carries a deliberately small runtime patch set on top of
 `NousResearch/hermes-agent`. It is a deployment branch, not a second gateway
 or an alternative profile.
+
+The currently verified upstream base is
+`b4f8c491d3452926deb7628edbdb6fe2a85ff576`. The same immutable SHA is stored
+in `.downstream-runtime-base` and is enforced by the runtime integrity gate.
 
 ## Canonical topology
 
@@ -39,7 +43,8 @@ other user data.
 
 ## Release procedure
 
-1. Fetch `upstream/main` and `origin/runtime`.
+1. Fetch `upstream/main` and `origin/runtime`, record the immutable upstream
+   SHA being integrated, and verify the runtime worktree starts clean.
 2. Create an isolated integration worktree from current `upstream/main`.
 3. Reproduce every carried behavior against untouched upstream. Drop a patch
    when upstream now satisfies its behavior contract.
@@ -55,8 +60,10 @@ other user data.
    a second daemon using `hermes gateway install --force --no-start-now`.
    Restart once, then run the post-deploy checks below.
 
-For routine upstream integration, merge current `upstream/main` into
-`runtime`, resolve against the behavior tests, and push the resulting
+For routine upstream integration, merge the recorded `upstream/main` SHA into
+`runtime` with `git merge --no-commit --no-ff <sha>`, resolve against the
+behavior tests, update `.downstream-runtime-base` to that exact SHA, and leave
+the merge uncommitted for review. After approval, commit and push the resulting
 fast-forwardable history. Do not silently rebase the deployed branch: the
 stable checkout must be able to update with a fast-forward. When upstream
 implements a carried patch, remove its active behavior with an explicit,
